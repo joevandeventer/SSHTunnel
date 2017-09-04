@@ -8,18 +8,56 @@
 
 import Foundation
 
+/**
+ An SSHTunnelDelegate-compatible object interacts with an SSHTunnel object to handle the process of authenticating and
+ maintaining a connection with an SSH server.
+ */
 public protocol SSHTunnelDelegate: class {
-    // Determine if the host is who it says it is. Application is responsible for maintaining a database of
-    // previously seen hostkeys - SOP is to approve if the fingerprints match, prompt the user to save if the
-    // host has never been seen before, and present a warning STRONGLY urging the user not to connect if the
-    // two fingerprints don't match.
-    //
-    // Returning false will stop the connection process.
+    /**
+     When negotiating the SSH connection, the server returns a fingerprint hash based on the hostname used to connect
+     and the given username. The delegate should then check an existing list of hash to determine whether the host's
+     fingerprint is already in the list (it won't be if it's a new connection), and if so, whether the given hash
+     matches the one already in the list. The delegate should return `true` if the fingerprint matches, and `false`
+     if it doesn't.
+     
+     
+     - parameter sshTunnel: The SSHTunnelProtocol-compliant caller.
+     - parameter fingerprintData: The fingerprint hash returned by the SSH server.
+     - returns: Bool declaring whether fingerprint is safe and authentication should continue.
+     */
+
+    // FIXME: An unknown hash needs to be presented to the user & approved. Break this out into a separate call/response.
+    
     func sshTunnel(_ sshTunnel: SSHTunnelProtocol, returnedFingerprint fingerprintData: String) -> Bool
 
+    /**
+     During authentication, the SSHTunnel object will notify the delegate that authentication data is needed, and
+     provide a list of compatible `AuthenticationMethods`. If necessary, the delegate can then prompt the user before
+     calling `sendAuthenticationData` to send the user's credentials.
+     
+     
+     - parameter sshTunnel: The SSHTunnelProtocol-compilant caller.
+     - parameter methods: The AuthenticationMethods reported by the server as being supported.
+     */
+    
     func sshTunnel(_ sshTunnel: SSHTunnelProtocol, requestsAuthentication methods: [AuthenticationMethods])
     
+    /**
+     After a connection is successfully established, the delegate will be notified and given a port on localhost
+     where communication can take place.
+     
+     
+     - parameter sshTunnel: The SSHTunnelProtocol-compilant caller.
+     - parameter port: The port on localhost where the app can connect.
+     */
     func sshTunnel(_ sshTunnel: SSHTunnelProtocol, beganListeningOn port: Int)
     
-    func sshTunnel(_ sshTunnel: SSHTunnelProtocol, didFailWithError: Error)
+    /**
+     If the connection experiences a fatal error, the delegate will be notified.
+     
+     
+     - parameter sshTunnel: The SSHTunnelProtocol-compliant caller.
+     - parameter error: The cause of the disconnect
+     */
+    func sshTunnel(_ sshTunnel: SSHTunnelProtocol, didFailWithError error: Error)
 }

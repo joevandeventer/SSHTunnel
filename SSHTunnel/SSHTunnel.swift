@@ -16,7 +16,10 @@ internal typealias SSH2Channel = OpaquePointer
 public enum SSHTunnelError: Error {
     case HostnameLookupError
     case SSH2ConnectionError
+    case SSH2FingerprintError
     case SSH2AuthenticationError
+    case SSH2ListenError
+    case SSH2RemoteDisconnectError
 }
 
 public class SSHTunnel: SSHTunnelProtocol {
@@ -50,13 +53,17 @@ public class SSHTunnel: SSHTunnelProtocol {
         connectOperations.isSuspended = true
         
         self.queue.async {
-            self.bindSocketToServer()
-            self.openSSHConnection()
-            self.beginSSHAuthentication()
+            do {
+                try self.bindSocketToServer()
+                try self.openSSHConnection()
+                try self.beginSSHAuthentication()
+            } catch {
+                self.disconnect(withError: error)
+            }
         }
     }
     
-    private func bindSocketToServer() {
+    private func bindSocketToServer() throws {
         // First, create a pointer to an empty addrinfo struct to hold the results linked list
         var servInfoPtr:UnsafeMutablePointer<addrinfo>? = UnsafeMutablePointer<addrinfo>.allocate(capacity: 1)
         
@@ -73,13 +80,12 @@ public class SSHTunnel: SSHTunnelProtocol {
         
         // Now, perform the hostname lookup
         if getaddrinfo(self.hostname, String(self.sshPort), &hints, &servInfoPtr) != 0 {
-            // Throw error. Hmmm.
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.HostnameLookupError)
             return
         }
         
         guard let firstAddr = servInfoPtr else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.HostnameLookupError)
             return
         }
         
@@ -87,7 +93,7 @@ public class SSHTunnel: SSHTunnelProtocol {
         for addr in sequence(first: firstAddr, next: {$0.pointee.ai_next}) {
             let address = addr.pointee
             let sock:Socket = socket(address.ai_family, address.ai_socktype, address.ai_protocol)
-            if sock < 1 {
+            if sock < 0 {
                 continue
             }
             
@@ -99,50 +105,50 @@ public class SSHTunnel: SSHTunnelProtocol {
             return
         }
         
-        self.disconnect()
+        self.disconnect(withError: SSHTunnelError.HostnameLookupError)
         return
     }
     
-    private func openSSHConnection() {
+    private func openSSHConnection() throws {
         self.sshSession = libssh2_session_init_ex(nil, nil, nil, nil)
         guard
             let session = self.sshSession,
             let socket = self.sshHostSocket,
             let delegate = self.delegate
         else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         
         if libssh2_session_handshake(session, socket) != 0 {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         
         guard let fingerprint = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1) else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         
         DispatchQueue.main.async {
             if delegate.sshTunnel(self, returnedFingerprint: String(cString: fingerprint)) == false {
-                self.disconnect()
+                self.disconnect(withError: SSHTunnelError.SSH2FingerprintError)
                 return
             }
         }
     }
     
-    private func beginSSHAuthentication() {
+    private func beginSSHAuthentication() throws {
         guard
             let session = self.sshSession,
             let delegate = self.delegate
         else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         
         guard let userAuthList = libssh2_userauth_list(session, self.username, UInt32(self.username.characters.count)) else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2AuthenticationError)
             return
         }
         
@@ -162,7 +168,7 @@ public class SSHTunnel: SSHTunnelProtocol {
     
     public func sendAuthenticationData(_ authenticationData: AuthenticationData) {
         guard let session = self.sshSession else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         self.queue.async {
@@ -185,7 +191,7 @@ public class SSHTunnel: SSHTunnelProtocol {
             }
             
             if result != 0 {
-                self.disconnect()
+                self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
                 return
             }
             
@@ -195,7 +201,7 @@ public class SSHTunnel: SSHTunnelProtocol {
     
     private func startListeningLocally() {
         guard let session = self.sshSession else {
-            self.disconnect()
+            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
             return
         }
         // Since this is just a local connection, hardcoding to IPv4 is fine.
@@ -206,8 +212,8 @@ public class SSHTunnel: SSHTunnelProtocol {
         address.sin_port = in_port_t(0.bigEndian)
         inet_aton("127.0.0.1", &address.sin_addr)
         let sockfd:Socket = socket(PF_INET, SOCK_STREAM, 0)
-        if sockfd < 1 {
-            self.disconnect()
+        if sockfd < 0 {
+            self.disconnect(withError: SSHTunnelError.SSH2ListenError)
             return
         }
         
@@ -232,6 +238,7 @@ public class SSHTunnel: SSHTunnelProtocol {
             $0.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
                 let port = Int($0.pointee.sin_port.bigEndian)
                 self.localPort = port
+                self.isConnected = true
                 DispatchQueue.main.async {
                     self.delegate?.sshTunnel(self, beganListeningOn: port)
                 }
@@ -239,13 +246,13 @@ public class SSHTunnel: SSHTunnelProtocol {
         }
         
         // This loop will just run till we die, blocking on accept
-        ACCEPT_LOOP: while true {
+        while true {
             var connectedAddrInfo = sockaddr.zeroed()
             var addrInfoSize:socklen_t = socklen_t(MemoryLayout<sockaddr>.size)
             let requestDescriptor = accept(sockfd, &connectedAddrInfo, &addrInfoSize)
             
             if requestDescriptor == -1 {
-                self.disconnect()
+                self.disconnect(withError: SSHTunnelError.SSH2ListenError)
                 break
             }
             
@@ -254,13 +261,14 @@ public class SSHTunnel: SSHTunnelProtocol {
         }
     }
     
-    public func disconnect() {
+    public func disconnect(withError error: Error? = nil) {
         for oper in self.connections.operations {
             oper.cancel()
         }
         
         if let sshSession = self.sshSession {
             libssh2_session_disconnect_ex(sshSession, SSH_DISCONNECT_BY_APPLICATION, "", nil)
+            libssh2_session_free(sshSession)
         }
         
         if let hostSocket = self.sshHostSocket {
@@ -271,7 +279,15 @@ public class SSHTunnel: SSHTunnelProtocol {
             close(listenSocket)
         }
         
+        libssh2_exit()
+        
         self.isConnected = false
+        
+        if let myError = error, let delegate = self.delegate {
+            DispatchQueue.main.async {
+                delegate.sshTunnel(self, didFailWithError: myError)
+            }
+        }
     }
     
     deinit {
