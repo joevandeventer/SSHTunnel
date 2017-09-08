@@ -26,8 +26,8 @@ public class SSHTunnel: SSHTunnelProtocol {
     let hostname: String
     let remotePort: Int
     let username: String
-    var sshPort: Int
-    public weak var delegate: SSHTunnelDelegate?
+    private(set) var sshPort: Int
+    private(set) weak var delegate: SSHTunnelDelegate?
     private(set) var isConnected: Bool
     private(set) var localPort: Int?
     private(set) var remoteIP: String?
@@ -40,10 +40,11 @@ public class SSHTunnel: SSHTunnelProtocol {
     private var queue = DispatchQueue(label: "SSHTunnel", attributes: .concurrent)
     private var connections = OperationQueue()
     
-    required public init(toHostname hostname: String, port: Int, username: String, sshPort: Int = 22) {
+    required public init(toHostname hostname: String, port: Int, username: String, delegate: SSHTunnelDelegate, sshPort: Int = 22) {
         self.hostname = hostname
         self.remotePort = port
         self.username = username
+        self.delegate = delegate
         self.isConnected = false
         self.sshPort = sshPort
     }
@@ -56,7 +57,6 @@ public class SSHTunnel: SSHTunnelProtocol {
             do {
                 try self.bindSocketToServer()
                 try self.openSSHConnection()
-                try self.beginSSHAuthentication()
             } catch {
                 self.disconnect(withError: error)
             }
@@ -80,13 +80,11 @@ public class SSHTunnel: SSHTunnelProtocol {
         
         // Now, perform the hostname lookup
         if getaddrinfo(self.hostname, String(self.sshPort), &hints, &servInfoPtr) != 0 {
-            self.disconnect(withError: SSHTunnelError.HostnameLookupError)
-            return
+            throw SSHTunnelError.HostnameLookupError
         }
         
         guard let firstAddr = servInfoPtr else {
-            self.disconnect(withError: SSHTunnelError.HostnameLookupError)
-            return
+            throw SSHTunnelError.HostnameLookupError
         }
         
         // Now, iterate through the linked list to find valid addresses
@@ -105,8 +103,7 @@ public class SSHTunnel: SSHTunnelProtocol {
             return
         }
         
-        self.disconnect(withError: SSHTunnelError.HostnameLookupError)
-        return
+        throw SSHTunnelError.HostnameLookupError
     }
     
     private func openSSHConnection() throws {
@@ -116,23 +113,31 @@ public class SSHTunnel: SSHTunnelProtocol {
             let socket = self.sshHostSocket,
             let delegate = self.delegate
         else {
-            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
-            return
+            throw SSHTunnelError.SSH2ConnectionError
         }
         
         if libssh2_session_handshake(session, socket) != 0 {
-            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
-            return
+            throw SSHTunnelError.SSH2ConnectionError
         }
         
         guard let fingerprint = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1) else {
-            self.disconnect(withError: SSHTunnelError.SSH2ConnectionError)
+            throw SSHTunnelError.SSH2ConnectionError
+        }
+        
+        delegate.sshTunnel(self, returnedFingerprint: String(cString: fingerprint))
+    }
+    
+    public func fingerprintIsAcceptable(_ acceptable: Bool) {
+        if !acceptable {
+            self.disconnect(withError: SSHTunnelError.SSH2FingerprintError)
             return
         }
         
-        DispatchQueue.main.async {
-            if delegate.sshTunnel(self, returnedFingerprint: String(cString: fingerprint)) == false {
-                self.disconnect(withError: SSHTunnelError.SSH2FingerprintError)
+        self.queue.async {
+            do {
+                try self.beginSSHAuthentication()
+            } catch {
+                self.disconnect(withError: error)
                 return
             }
         }

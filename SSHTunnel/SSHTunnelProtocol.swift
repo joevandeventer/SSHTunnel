@@ -16,6 +16,11 @@ public protocol SSHTunnelProtocol {
     func connect()
     
     /**
+     
+     */
+    func fingerprintIsAcceptable(_ acceptable: Bool)
+    
+    /**
      Attempt to send a user's authentication data to SSH server. Requires a prior call to `requestsAuthentication`.
      
      - Parameters:

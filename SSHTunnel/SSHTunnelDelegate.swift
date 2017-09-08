@@ -25,10 +25,8 @@ public protocol SSHTunnelDelegate: class {
      - parameter fingerprintData: The fingerprint hash returned by the SSH server.
      - returns: Bool declaring whether fingerprint is safe and authentication should continue.
      */
-
-    // FIXME: An unknown hash needs to be presented to the user & approved. Break this out into a separate call/response.
     
-    func sshTunnel(_ sshTunnel: SSHTunnelProtocol, returnedFingerprint fingerprintData: String) -> Bool
+    func sshTunnel(_ sshTunnel: SSHTunnelProtocol, returnedFingerprint fingerprintData: String)
 
     /**
      During authentication, the SSHTunnel object will notify the delegate that authentication data is needed, and
